@@ -5,6 +5,10 @@
 #include <Adafruit_SSD1331.h>
 #include "Adafruit_SHT4x.h"
 #include <WiFi.h>
+#include <HTTPClient.h>
+#include "NodeData.h"
+#include "JsonHelpers.h"
+#include <vector>
 
 #define BLACK   0x0000
 #define BLUE    0x001F
@@ -15,24 +19,6 @@
 #define YELLOW  0xFFE0
 #define WHITE   0xFFFF
 
-// 14x14 Wi-Fi icon (1 = pixel on, 0 = off)
-const uint8_t wifiIcon[] = {
-  0b00000000, 0b00000000, // row 0
-  0b00000111, 0b00000000, // row 1 (largest arc)
-  0b00001000, 0b10000000, // row 2
-  0b00010000, 0b01000000, // row 3
-  0b00100000, 0b00100000, // row 4 (medium arc)
-  0b01000000, 0b00010000, // row 5
-  0b00000000, 0b00000000, // row 6 (gap)
-  0b00000100, 0b01000000, // row 7 (smallest arc)
-  0b00000011, 0b10000000, // row 8
-  0b00000000, 0b00000000, // row 9
-  0b00000000, 0b00000000, // row 10
-  0b00000000, 0b00000000, // row 11
-  0b00000001, 0b00000000, // row 12 (bottom dot)
-  0b00000000, 0b00000000  // row 13
-};
-
 #define cs  7
 #define rst 3
 #define dc  2
@@ -42,6 +28,15 @@ Adafruit_SHT4x sht4 = Adafruit_SHT4x();
 
 const char* ssid     = "SKYWXRFD";
 const char* password = "Knh9wHi6FQQS";
+const char* serverUrl = "http://192.168.0.67:3000/api/data";
+
+Sensor temperatureSensor = { "Temperature Sensor", "TEMPERATURE", "SHT-41D" };
+Sensor humiditySensor    = { "Humidity Sensor",    "HUMIDITY",    "SHT-41D" };
+Node node = {
+  "Node 1",
+  "Garage",
+  { &temperatureSensor, &humiditySensor }
+};
 
 void setup() {
   Serial.begin(115200);
@@ -53,7 +48,6 @@ void setup() {
   display.fillScreen(BLACK);
   displayText(0, 0, 1, "Garage", YELLOW);
   display.drawLine(0, 10, 96, 10, YELLOW);
-  display.drawLine(0, 55, 96, 55, YELLOW);
 
   if (!sht4.begin()) {
     Serial.println("Couldn't find SHT4x");
@@ -67,9 +61,9 @@ void setup() {
   struct tm tm;
   tm.tm_year = 2025 - 1900;  // years since 1900
   tm.tm_mon  = 9 - 1;        // months since January
-  tm.tm_mday = 6;
-  tm.tm_hour = 14;
-  tm.tm_min  = 0;
+  tm.tm_mday = 7;
+  tm.tm_hour = 18;
+  tm.tm_min  = 24;
   tm.tm_sec  = 0;
   time_t t = mktime(&tm);
   struct timeval now = { .tv_sec = t };
@@ -79,69 +73,81 @@ void setup() {
 }
 
 void loop() {
-  sensors_event_t humidity, temp;
-  if (!sht4.getEvent(&humidity, &temp)) {
-    Serial.println("Failed to read sensor");
-    delay(1000);
-    return;
+
+  static bool readThisSecond = false;
+  static bool storedThisInterval = false;
+  static bool sentThisInterval = false;
+  static int lastSec = -1;
+
+  time_t now = getCurrentTime();
+  struct tm t;
+  gmtime_r(&now, &t);  // broken-down UTC time
+
+  // --- Reset flags at new second ---
+  if (t.tm_sec != lastSec) {
+    readThisSecond = false;
+    storedThisInterval = false;
+    sentThisInterval = false;
+    lastSec = t.tm_sec;
   }
 
-  Serial.print("Temp: ");
-  Serial.print(temp.temperature);
-  Serial.print(" °C  ");
-  Serial.print("Humidity: ");
-  Serial.print(humidity.relative_humidity);
-  Serial.println(" %");
+  // --- Display every second ---
+  if (!readThisSecond) {
+    sensors_event_t humidity, temp;
+    if (!sht4.getEvent(&humidity, &temp)) {
+      Serial.println("Failed to read sensor");
+        delay(500);
+        return;
+    }
+    readThisSecond = true;
 
-  updateDisplay(temp.temperature, humidity.relative_humidity);
-  delay(2000);
+    // --- Store every 15 seconds ---
+    if ((t.tm_sec % 15 == 0) && !storedThisInterval) {
+      addReading(temperatureSensor, now, temp.temperature, "CELSIUS");
+      addReading(humiditySensor, now, humidity.relative_humidity, "PERCENT");
+      storedThisInterval = true;
+    }
+
+    // Send every 2 minutes ---
+    if ((t.tm_min % 2 == 0) && (t.tm_sec == 0) && !sentThisInterval) {
+      // sendData();
+      sentThisInterval = true;
+    }
+
+    updateDisplay(now, temp.temperature, humidity.relative_humidity);
+  }
+  
+  delay(50);
 }
 
-void updateDisplay(float temperature, float humidity) {
-  String date, time;
-  dateTimeString(date, time);
+void updateDisplay(time_t now, float temperature, float humidity) {
+  String dateStr = formatDate(now);
+  String timeStr = formatTime(now);
 
-  String tempText = String(temperature);
-  tempText.concat(char(247));
-  tempText.concat("C");
+  String tempStr = String(temperature);
+  tempStr.concat(char(247));
+  tempStr.concat("C");
 
-  String humidText = String(humidity);
-  humidText.concat("%RH");
+  String humidStr = String(humidity);
+  humidStr.concat("%RH");
 
-  display.fillRect(0, 14, 200, 40, BLACK);
-  displayText(0, 14, 1, date, CYAN);
-  displayText(0, 24, 1, time, CYAN);
-  displayText(0, 34, 1, tempText, CYAN);
-  displayText(0, 44, 1, humidText, CYAN);
+  displayText(0, 14, 1, dateStr, CYAN);
+  displayText(0, 24, 1, timeStr, CYAN);
+  displayText(0, 34, 1, tempStr, CYAN);
+  displayText(0, 44, 1, humidStr, CYAN);
 
-  display.fillRect(80, 0, 8, 8, BLACK);
   drawWiFiIcon(86, 0, WiFi.status() == WL_CONNECTED);
+
+  String bufferStr = String(getBufferPercentFull(temperatureSensor));
+  bufferStr.concat("% Full");
+  displayText(0, 54, 1, bufferStr, YELLOW);
 }
 
 void displayText(int x, int y, int size, String text, int color) {
   display.setCursor(x, y);
-  display.setTextColor(color);
+  display.setTextColor(color, BLACK);
   display.setTextSize(size);
   display.print(text);
-}
-
-void dateTimeString(String &dateStr, String &timeStr) {
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    dateStr = "00/00/0000";
-    timeStr = "00:00:00";
-    return;
-  }
-
-  char buf[16];
-
-  // Date string: dd/mm/YYYY
-  strftime(buf, sizeof(buf), "%d/%m/%Y", &timeinfo);
-  dateStr = String(buf);
-
-  // Time string: hh:mm:ss
-  strftime(buf, sizeof(buf), "%H:%M:%S", &timeinfo);
-  timeStr = String(buf);
 }
 
 void drawWiFiIcon(int x, int y, bool connected) {
@@ -149,4 +155,41 @@ void drawWiFiIcon(int x, int y, bool connected) {
 
   // Circle
   display.fillCircle(x + 4, y + 4, 3, color);
+}
+
+void sendData(float temperature, float humidity) {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  http.begin(serverUrl);
+  http.addHeader("Content-Type", "application/json");
+
+  String json = "{\"temperature\":" + String(temperature) + ",\"humidity\":" + String(humidity) + "}";
+  int code = http.POST(json);
+  Serial.print("HTTP Response code: ");
+  Serial.println(code);
+
+  http.end();
+}
+
+time_t getCurrentTime() {
+    return time(nullptr);  // seconds since Jan 1, 1970 UTC
+}
+
+String formatDate(time_t t) {
+    struct tm timeinfo;
+    gmtime_r(&t, &timeinfo);
+
+    char buf[16];
+    strftime(buf, sizeof(buf), "%d/%m/%Y", &timeinfo);
+    return String(buf);
+}
+
+String formatTime(time_t t) {
+    struct tm timeinfo;
+    gmtime_r(&t, &timeinfo);
+
+    char buf[16];
+    strftime(buf, sizeof(buf), "%H:%M:%S", &timeinfo);
+    return String(buf);
 }
